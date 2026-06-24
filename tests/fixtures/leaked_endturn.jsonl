@@ -1,0 +1,2 @@
+{"type":"user","message":{"role":"user","content":"check the STOP flag and continue the loop"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Resuming the loop tick.\n\ncourt\n<invoke name=\"Bash\">\n<parameter name=\"command\">ls /tmp/STOP 2>/dev/null && echo halt || echo go</parameter>\n</invoke>"}]},"stop_reason":"end_turn"}

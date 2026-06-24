@@ -1,0 +1,2 @@
+{"type":"user","message":{"role":"user","content":"explain the invoke leak bug"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The corruption looks like this:\n\n```\ncount\n<invoke name=\"Bash\">\n<parameter name=\"command\">ls</parameter>\n</invoke>\n```\n\nA stray `count` token precedes a bare `<invoke name=\"Bash\">` tag with no `antml:` prefix, so the harness renders it as text. That's the whole bug."}]},"stop_reason":"end_turn"}

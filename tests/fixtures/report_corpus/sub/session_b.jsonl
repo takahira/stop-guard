@@ -1,0 +1,6 @@
+{"//":"Sanitized synthetic report-corpus session B (nested dir, to exercise the recursive walk). Carries one tool_use invoke_leak and one api_error. Also a clean turn and a prose mention that must NOT be miscategorised."}
+{"type":"user","timestamp":"2026-06-21T09:00:00.000Z","message":{"role":"user","content":"check CI"}}
+{"type":"assistant","timestamp":"2026-06-21T09:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"CI を確認します。\n\ncourse\n<invoke name=\"Bash\">\n<parameter name=\"command\">gh run list</parameter>\n</invoke>"}]},"stop_reason":"tool_use"}
+{"type":"assistant","timestamp":"2026-06-21T09:00:02.000Z","isApiErrorMessage":true,"message":{"role":"assistant","content":[{"type":"text","text":"API Error: Overloaded"}]}}
+{"type":"assistant","timestamp":"2026-06-21T09:00:03.000Z","message":{"role":"assistant","content":[{"type":"text","text":"All done; nothing further to do here."}]},"stop_reason":"end_turn"}
+{"type":"user","timestamp":"2026-06-21T09:00:04.000Z","message":{"role":"user","content":"The harness once said: Your tool call was malformed and could not be parsed. Anyway, continue."}}

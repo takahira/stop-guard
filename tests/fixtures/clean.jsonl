@@ -1,0 +1,4 @@
+{"type":"user","message":{"role":"user","content":"summarize what you did"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"a\nb"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done. I listed the directory and everything looks fine; no further action needed."}]},"stop_reason":"end_turn"}

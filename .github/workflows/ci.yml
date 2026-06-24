@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit tests (${{ matrix.os }}, py ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      # 3.9 is a conservative chosen floor; `str | None` in annotations is safe
+      # under `from __future__ import annotations` (deferred evaluation, available
+      # since 3.7). 3.14 = current release.
+      # Transcript parsing is POSIX-FS-independent; the macOS slot verifies the
+      # current Python on that platform too.
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.9", "3.14"]
+        include:
+          - os: macos-latest
+            python: "3.14"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      # Zero third-party dependencies; discover from repo root.
+      - name: unittest
+        run: python -m unittest discover -s tests -p "test_*.py" -t .

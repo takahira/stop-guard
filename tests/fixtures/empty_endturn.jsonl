@@ -1,0 +1,5 @@
+{"//":"Sanitized synthetic transcript: the last assistant turn ended on end_turn but produced an empty content list (no text, no tool_use, no thinking). This is the zero-content end_turn the empty-turn guard must block."}
+{"type":"user","message":{"role":"user","content":"continue the autonomous loop"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"<redacted>"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[]},"stop_reason":"end_turn"}

@@ -1,0 +1,3 @@
+{"//":"Sanitized synthetic transcript: last assistant turn ended on end_turn with only a whitespace text block. Strict empty/zero-content check must treat whitespace-only text as empty and block."}
+{"type":"user","message":{"role":"user","content":"finish the task"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"   \n\t  "}]},"stop_reason":"end_turn"}

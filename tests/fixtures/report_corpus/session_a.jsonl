@@ -1,0 +1,5 @@
+{"//":"Sanitized synthetic report-corpus session A. Carries one end_turn invoke_leak, one empty_end_turn, and one malformed_retry_injected (exact harness prefix)."}
+{"type":"user","timestamp":"2026-06-20T10:00:00.000Z","message":{"role":"user","content":"start the loop"}}
+{"type":"assistant","timestamp":"2026-06-20T10:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Resuming.\n\ncourt\n<invoke name=\"Bash\">\n<parameter name=\"command\">ls</parameter>\n</invoke>"}]},"stop_reason":"end_turn"}
+{"type":"user","timestamp":"2026-06-20T10:00:02.000Z","message":{"role":"user","content":"Your tool call was malformed and could not be parsed. Please retry."}}
+{"type":"assistant","timestamp":"2026-06-20T10:00:03.000Z","message":{"role":"assistant","content":[]},"stop_reason":"end_turn"}

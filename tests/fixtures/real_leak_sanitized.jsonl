@@ -1,0 +1,5 @@
+{"//":"Sanitized from a real local transcript (2026-06-16). Absolute paths, project text, and environment-specific tool names redacted; the corruption signature (stray 'course' token + bare <invoke>, missing antml: prefix) is preserved verbatim. stop_reason=tool_use here, which is the case the harness self-heals; the dangerous end_turn variant is in leaked_endturn.jsonl."}
+{"type":"user","message":{"role":"user","content":"plan confirmed, start phase 1"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"計画確定。Phase 1 から着手します。\n\ncourse\n<invoke name=\"Bash\">\n<parameter name=\"command\">git status</parameter>\n</invoke>"}]},"stop_reason":"tool_use"}
+{"type":"user","message":{"role":"user","content":"main に push 完了。CI 確認して"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"CI を確認します。\n\ncourt\n<invoke name=\"Bash\">\n<parameter name=\"command\">cd /Users/<redacted>/<repo>; gh run list --branch main --limit 6 2>&1</parameter>\n<parameter name=\"description\">Check recent main CI runs</parameter>\n</invoke>"}]},"stop_reason":"tool_use"}

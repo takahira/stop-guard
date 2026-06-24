@@ -1,0 +1,7 @@
+{"//":"Synthetic fixture for stale-leak regression (D1). Three assistant turns: (A) end_turn with leaked bare invoke, (B) tool_use-only (no text), (C) empty end_turn. The hook must fire on the FINAL turn (C) and emit the empty-turn reason, not the leak/retry reason."}
+{"type":"user","message":{"role":"user","content":"start the loop"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Checking status.\n\ncourt\n<invoke name=\"Bash\">\n<parameter name=\"command\">ls /tmp/STOP 2>/dev/null && echo halt || echo go</parameter>\n</invoke>"}]},"stop_reason":"end_turn"}
+{"type":"user","message":{"role":"user","content":"Your tool call was malformed. Please retry."}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls /tmp/STOP 2>/dev/null && echo halt || echo go"}}]},"stop_reason":"tool_use"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"go"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[]},"stop_reason":"end_turn"}
