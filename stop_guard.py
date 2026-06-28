@@ -77,7 +77,7 @@ import time
 from typing import TypedDict
 
 # Single source of truth for the version (pyproject reads this via hatchling).
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 
 class LeakDetail(TypedDict):
