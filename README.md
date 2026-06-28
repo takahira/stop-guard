@@ -5,6 +5,7 @@
 It catches turns that end with **no usable result** and injects a retry, so your
 autonomous loops don't die without finishing.
 
+[![PyPI version](https://img.shields.io/pypi/v/stop-guard.svg)](https://pypi.org/project/stop-guard/)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/takahira/stop-guard)
@@ -85,11 +86,33 @@ This is a **pinpoint** guard, not a cure-all:
 
 Requires Python 3.9+. No third-party dependencies.
 
+### From PyPI (recommended)
+
+```bash
+pip install stop-guard          # or: pipx install stop-guard
+```
+
+This puts a `stop-guard` command on your PATH. Register it as a `Stop` hook in
+`~/.claude/settings.json` (merge into an existing `hooks.Stop` array):
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "stop-guard" } ] }
+    ]
+  }
+}
+```
+
+Then **run in observe mode first** (see below), confirm zero false positives on
+your own history, and switch to blocking.
+
+### From source (bleeding-edge)
+
 1. Drop `stop_guard.py` somewhere stable.
-2. Merge `settings-snippet.json` into `~/.claude/settings.json` (use an
-   absolute path to the script).
-3. **Run in observe mode first** (see below), confirm zero false positives on
-   your own history, then enable blocking.
+2. Merge `settings-snippet.json` into `~/.claude/settings.json`, pointing
+   `command` at the absolute path: `python3 /abs/path/to/stop_guard.py`.
 
 The hook is **fail-open**: any error → it stays silent and never blocks a turn.
 
@@ -200,6 +223,7 @@ sanitized transcript snippets.
 | File | Purpose |
 | --- | --- |
 | `stop_guard.py` | The Stop hook + detector (also runnable for ad-hoc scans) |
+| `pyproject.toml` | Packaging metadata (`pip install stop-guard` → `stop-guard` command) |
 | `scan_corpus.py` | Measure real incident rate across your transcript corpus (`--report` for the broad reliability breakdown) |
 | `settings-snippet.json` | Hook registration snippet for `settings.json` |
 | `tests/` | unittest suite + sanitized fixtures |

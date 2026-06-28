@@ -1,12 +1,12 @@
 {
-  "//": "Add this Stop hook to ~/.claude/settings.json (merge into an existing hooks.Stop array). Replace the path with the absolute path to stop_guard.py on your machine. The hook is fail-open: it emits a block decision for (1) a leaked tool call found at the end of the last assistant turn, OR (2) an empty/zero-content end_turn (no non-whitespace text, no tool use, no thinking block).",
+  "//": "Add this Stop hook to ~/.claude/settings.json (merge into an existing hooks.Stop array). After `pip install stop-guard` the `stop-guard` command is on PATH, so the command below works as-is. For a from-source install, replace it with `python3 /ABSOLUTE/PATH/TO/stop_guard.py`. The hook is fail-open: it emits a block decision for (1) a leaked tool call found at the end of the last assistant turn, OR (2) an empty/zero-content end_turn (no non-whitespace text, no tool use, no thinking block).",
   "hooks": {
     "Stop": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /ABSOLUTE/PATH/TO/stop-guard/stop_guard.py"
+            "command": "stop-guard"
           }
         ]
       }

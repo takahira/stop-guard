@@ -1,0 +1,67 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "stop-guard"
+description = "Claude Code Stop hook that rescues silent, empty, or leaked end-of-turn failures by injecting a retry"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Takayoshi Hirano" }]
+keywords = [
+    "claude",
+    "claude-code",
+    "hook",
+    "stop-hook",
+    "llm",
+    "agent",
+    "tool-use",
+    "reliability",
+    "retry",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Utilities",
+]
+# Zero runtime dependencies on purpose: standard library only (Python 3.9+).
+dependencies = []
+dynamic = ["version"]
+
+[project.scripts]
+stop-guard = "stop_guard:main"
+
+[project.urls]
+Homepage = "https://github.com/takahira/stop-guard"
+Repository = "https://github.com/takahira/stop-guard"
+Issues = "https://github.com/takahira/stop-guard/issues"
+
+# Single source of truth for the version: stop_guard.py __version__.
+[tool.hatch.version]
+path = "stop_guard.py"
+
+# Single-module distribution: ship the one importable module that holds both the
+# hook and the CLI. scan_corpus.py is a maintenance tool, not part of the package.
+[tool.hatch.build.targets.wheel]
+only-include = ["stop_guard.py"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "stop_guard.py",
+    "tests/",
+    "README.md",
+    "LICENSE",
+]

@@ -76,6 +76,9 @@ import sys
 import time
 from typing import TypedDict
 
+# Single source of truth for the version (pyproject reads this via hatchling).
+__version__ = "0.1.0"
+
 
 class LeakDetail(TypedDict):
     """Result shape of :func:`leak_details`."""
@@ -545,6 +548,7 @@ def _cmd_check() -> int:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="stop-guard Stop hook / detector")
+    parser.add_argument("--version", action="version", version=f"stop-guard {__version__}")
     g = parser.add_mutually_exclusive_group()
     g.add_argument("--self-test", action="store_true", help="run built-in detection samples")
     g.add_argument("--scan", metavar="JSONL", help="scan a transcript's last assistant turn")
