@@ -181,6 +181,56 @@ class TranscriptExtraction(unittest.TestCase):
         self.assertEqual(d["token"], "court")
 
 
+class MalformedTranscriptLines(unittest.TestCase):
+    """Lines that are valid JSON but not dict events (e.g. ``null``), or events
+    whose ``message`` is not a dict, must be skipped -- not raise AttributeError.
+    The AttributeError used to escape to run_hook's outer fail-open, silently
+    disabling the guard for every Stop of the session."""
+
+    LEAK_TURN = {"type": "assistant", "message": {
+        "role": "assistant", "content": [{"type": "text", "text":
+            "Resuming.\n\ncount\n<invoke name=\"Bash\">\n"
+            "<parameter name=\"command\">ls</parameter>\n</invoke>"}]},
+        "stop_reason": "end_turn"}
+
+    def _write_transcript(self, tmp: str) -> str:
+        path = os.path.join(tmp, "malformed.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("null\n")                # valid JSON, not a dict
+            fh.write("42\n")                  # valid JSON, not a dict
+            fh.write('["a", "b"]\n')          # valid JSON, not a dict
+            fh.write(json.dumps({"type": "assistant",
+                                 "message": "not a dict"}) + "\n")
+            fh.write(json.dumps(self.LEAK_TURN) + "\n")
+        return path
+
+    def test_hook_still_blocks_leak_despite_malformed_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_transcript(tmp)
+            code, out = _run_hook(
+                {"hook_event_name": "Stop", "stop_hook_active": False,
+                 "transcript_path": path}, env={"STOP_GUARD_NOLOG": "1"})
+            self.assertEqual(code, 0)
+            decision = json.loads(out)
+            self.assertEqual(decision["decision"], "block")
+
+    def test_extractors_skip_non_dict_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_transcript(tmp)
+            self.assertIn("<invoke", ig.last_assistant_text(path))
+            content = ig.last_assistant_content(path)
+            self.assertIsInstance(content, list)
+
+    def test_scan_cli_survives_malformed_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_transcript(tmp)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                code = ig.main(["--scan", path])
+            self.assertEqual(code, 0)
+            self.assertTrue(json.loads(buf.getvalue())["leak"])
+
+
 class EmptyEndTurnDetection(unittest.TestCase):
     """Guard 2: a turn that ended on end_turn but produced no actionable
     content (no non-whitespace text, no tool_use, no thinking) is empty."""

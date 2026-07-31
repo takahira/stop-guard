@@ -277,9 +277,16 @@ def last_assistant_text(transcript_path: str) -> str:
                     evt = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if evt.get("type") != "assistant":
+                # Defensive: json.loads accepts any JSON value, so a line holding
+                # `null`, a number, or a list parses fine but has no .get(). The
+                # AttributeError used to escape to run_hook's fail-open, silently
+                # disabling the guard for EVERY Stop in that session. Skip the
+                # line instead (cf. scan_corpus's per-event isolation).
+                if not isinstance(evt, dict) or evt.get("type") != "assistant":
                     continue
                 msg = evt.get("message", evt)
+                if not isinstance(msg, dict):
+                    continue
                 text = _content_to_text(msg.get("content"))
                 # Always update so last reflects the FINAL assistant turn,
                 # matching last_assistant_content(). This prevents a stale
@@ -312,9 +319,13 @@ def last_assistant_content(transcript_path: str) -> "str | list | None":
                     evt = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if evt.get("type") != "assistant":
+                # Defensive: skip non-dict events / non-dict message fields, same
+                # as last_assistant_text() -- see the rationale there.
+                if not isinstance(evt, dict) or evt.get("type") != "assistant":
                     continue
                 msg = evt.get("message", evt)
+                if not isinstance(msg, dict):
+                    continue
                 content = msg.get("content")
     except (OSError, UnicodeDecodeError) as exc:
         _debug(f"could not read transcript {transcript_path!r}: {exc}; failing open")
