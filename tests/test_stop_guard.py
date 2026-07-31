@@ -231,6 +231,39 @@ class MalformedTranscriptLines(unittest.TestCase):
             self.assertTrue(json.loads(buf.getvalue())["leak"])
 
 
+class SinglePassExtraction(unittest.TestCase):
+    """Issue #2 (Low): both guards share ONE transcript scan per Stop."""
+
+    def test_last_assistant_turn_matches_wrappers(self):
+        for fixture in ("leaked_endturn.jsonl", "clean.jsonl", "empty_endturn.jsonl"):
+            path = os.path.join(FIX, fixture)
+            text, content = ig.last_assistant_turn(path)
+            self.assertEqual(text, ig.last_assistant_text(path), fixture)
+            self.assertEqual(content, ig.last_assistant_content(path), fixture)
+
+    def test_last_assistant_turn_fails_open_on_missing_file(self):
+        self.assertEqual(ig.last_assistant_turn("/nonexistent/x.jsonl"), ("", None))
+
+    def test_run_hook_reads_transcript_once(self):
+        import builtins
+        from unittest import mock
+        path = os.path.join(FIX, "clean.jsonl")
+        real_open = builtins.open
+        opens = []
+
+        def counting_open(file, *args, **kwargs):
+            if file == path:
+                opens.append(file)
+            return real_open(file, *args, **kwargs)
+
+        with mock.patch("builtins.open", side_effect=counting_open):
+            code, _ = _run_hook({"hook_event_name": "Stop", "stop_hook_active": False,
+                                 "transcript_path": path},
+                                env={"STOP_GUARD_NOLOG": "1"})
+        self.assertEqual(code, 0)
+        self.assertEqual(len(opens), 1, "transcript must be scanned exactly once")
+
+
 class EmptyEndTurnDetection(unittest.TestCase):
     """Guard 2: a turn that ended on end_turn but produced no actionable
     content (no non-whitespace text, no tool_use, no thinking) is empty."""

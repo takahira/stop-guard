@@ -264,9 +264,19 @@ def _content_to_text(content: "str | list | None") -> str:
 content_to_text = _content_to_text
 
 
-def last_assistant_text(transcript_path: str) -> str:
-    """Extract the text channel of the last assistant turn in a JSONL transcript."""
-    last = ""
+def last_assistant_turn(transcript_path: str) -> "tuple[str, str | list | None]":
+    """Return ``(text, content)`` of the last assistant turn in ONE transcript pass.
+
+    ``text`` is the flattened text channel (leak guard); ``content`` is the raw
+    ``content`` value -- blocks, not text -- which the empty-turn guard needs to
+    see structured blocks (tool_use / thinking). Both reflect the FINAL assistant
+    turn, so a stale leak from an earlier turn never causes a false-positive
+    block when the final turn is actually clean.
+
+    Reads fail-open: any error yields ``("", None)`` -- the same values as an
+    absent assistant turn -- so the guards allow the stop (never block).
+    """
+    content: "str | list | None" = None
     try:
         with open(transcript_path, "r", encoding="utf-8") as fh:
             for line in fh:
@@ -287,50 +297,23 @@ def last_assistant_text(transcript_path: str) -> str:
                 msg = evt.get("message", evt)
                 if not isinstance(msg, dict):
                     continue
-                text = _content_to_text(msg.get("content"))
-                # Always update so last reflects the FINAL assistant turn,
-                # matching last_assistant_content(). This prevents a stale
-                # leak from an earlier turn causing a false-positive block
-                # when the final turn is actually empty (not a leak).
-                last = text
+                content = msg.get("content")
     except (OSError, UnicodeDecodeError) as exc:
         # Read failure is fail-open (allow the stop), but make it observable --
         # otherwise it is indistinguishable from a genuinely clean turn.
         _debug(f"could not read transcript {transcript_path!r}: {exc}; failing open")
-        return ""
-    return last
+        return "", None
+    return _content_to_text(content), content
+
+
+def last_assistant_text(transcript_path: str) -> str:
+    """Extract the text channel of the last assistant turn in a JSONL transcript."""
+    return last_assistant_turn(transcript_path)[0]
 
 
 def last_assistant_content(transcript_path: str) -> "str | list | None":
-    """Return the raw ``content`` of the last assistant turn (blocks, not text).
-
-    The empty-turn guard needs to see structured blocks (tool_use / thinking),
-    which :func:`last_assistant_text` discards by flattening to text only. Reads
-    fail-open: any error yields ``None`` (treated as "cannot judge", never block).
-    """
-    content: "str | list | None" = None
-    try:
-        with open(transcript_path, "r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    evt = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                # Defensive: skip non-dict events / non-dict message fields, same
-                # as last_assistant_text() -- see the rationale there.
-                if not isinstance(evt, dict) or evt.get("type") != "assistant":
-                    continue
-                msg = evt.get("message", evt)
-                if not isinstance(msg, dict):
-                    continue
-                content = msg.get("content")
-    except (OSError, UnicodeDecodeError) as exc:
-        _debug(f"could not read transcript {transcript_path!r}: {exc}; failing open")
-        return None
-    return content
+    """Return the raw ``content`` of the last assistant turn (blocks, not text)."""
+    return last_assistant_turn(transcript_path)[1]
 
 
 def is_empty_turn(content: "str | list | None") -> bool:
@@ -429,11 +412,14 @@ def run_hook(stdin_text: str) -> int:
 
         observe = bool(os.environ.get("STOP_GUARD_OBSERVE"))
 
+        # Both guards judge the same final assistant turn, so read the transcript
+        # ONCE and share the result (issue #2: avoid two full scans per Stop).
+        text, content = last_assistant_turn(transcript)
+
         # Guard 1: invoke-leak. A leaked <invoke> is terminal text, so the turn is
         # never "empty" by the strict definition below -- but evaluating the leak
         # first keeps the two branches coherent and gives the leak its specific
         # retry text.
-        text = last_assistant_text(transcript)
         d = leak_details(text, _tokens_from_env())
         if d["leak"]:
             _log_detection({
@@ -458,7 +444,6 @@ def run_hook(stdin_text: str) -> int:
         # is treated the same as end_turn (matching the leak path, which never
         # gates on stop_reason).
         if not os.environ.get("STOP_GUARD_NO_EMPTY_TURN"):
-            content = last_assistant_content(transcript)
             if is_empty_turn(content):
                 _log_detection({
                     "ts": int(time.time()),
