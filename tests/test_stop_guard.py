@@ -915,5 +915,74 @@ class T3ReportNonDictMessageRegression(unittest.TestCase):
             self.assertEqual(result["skipped_files"], 0)
 
 
+class SplitRowAssistantTurn(unittest.TestCase):
+    """Issue #3: one assistant message split across rows sharing `message.id`.
+
+    Claude Code can emit one row per content block.  A `[thinking]` row followed
+    by an empty `[text]` row is ONE non-empty turn; judging only the final row
+    made the empty-turn guard block a normal completion.
+    """
+
+    @staticmethod
+    def _row(message_id, content):
+        message = {"role": "assistant", "content": content}
+        if message_id is not None:
+            message["id"] = message_id
+        return json.dumps({"type": "assistant", "message": message,
+                           "stop_reason": "end_turn"})
+
+    def _write(self, tmp, rows):
+        path = os.path.join(tmp, "split.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(row + "\n")
+        return path
+
+    def test_thinking_then_empty_text_rows_merge_into_one_non_empty_turn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, [
+                self._row("msg_1", [{"type": "thinking", "thinking": "considering"}]),
+                self._row("msg_1", [{"type": "text", "text": "   "}]),
+            ])
+            _text, content = ig.last_assistant_turn(path)
+            self.assertEqual(len(content), 2, "rows sharing message.id must merge")
+            self.assertFalse(ig.is_empty_turn(content),
+                             "a thinking block means the turn is not empty")
+
+    def test_split_turn_does_not_block_the_stop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, [
+                self._row("msg_1", [{"type": "thinking", "thinking": "considering"}]),
+                self._row("msg_1", [{"type": "text", "text": ""}]),
+            ])
+            code, out = _run_hook(
+                {"hook_event_name": "Stop", "stop_hook_active": False,
+                 "transcript_path": path}, env={"STOP_GUARD_NOLOG": "1"})
+            self.assertEqual(code, 0)
+            self.assertEqual(out.strip(), "", "a split non-empty turn must not be blocked")
+
+    def test_distinct_ids_keep_last_turn_semantics(self):
+        # A genuinely new (and genuinely empty) turn must still be judged empty:
+        # merging is scoped to consecutive rows that share an id.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, [
+                self._row("msg_1", [{"type": "thinking", "thinking": "considering"}]),
+                self._row("msg_2", [{"type": "text", "text": "   "}]),
+            ])
+            _text, content = ig.last_assistant_turn(path)
+            self.assertEqual(len(content), 1, "different ids must not merge")
+            self.assertTrue(ig.is_empty_turn(content))
+
+    def test_rows_without_id_keep_last_turn_semantics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, [
+                self._row(None, [{"type": "thinking", "thinking": "considering"}]),
+                self._row(None, [{"type": "text", "text": "   "}]),
+            ])
+            _text, content = ig.last_assistant_turn(path)
+            self.assertEqual(len(content), 1, "id-less rows keep one-row-per-turn")
+            self.assertTrue(ig.is_empty_turn(content))
+
+
 if __name__ == "__main__":
     unittest.main()

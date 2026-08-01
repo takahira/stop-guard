@@ -213,7 +213,7 @@ and the corruption signatures.
 python3 -m unittest discover -s tests -p "test_*.py" -t . -v
 ```
 
-79 tests, stdlib `unittest` only. Fixtures under `tests/fixtures/` are
+83 tests, stdlib `unittest` only. Fixtures under `tests/fixtures/` are
 sanitized transcript snippets.
 
 ---

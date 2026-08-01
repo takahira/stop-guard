@@ -72,7 +72,10 @@ Corpus measurement: a corpus of ~5,500 sessions (over ~30 days) under `~/.claude
 
 Every issue lists only `court` / `call` / `count`. The corpus also contains **`course`**, and
 `scan_corpus.py` tallies **court 34 / course 17 / count 8** (`call` was not observed in this corpus; + 1 bare-invoke-element turn with no captured stray token = 60), i.e.
-**`course` is the second most common**, yet it is unreported across all issues. A real example (from an actual session):
+**`course` is the second most common**, yet it is unreported across all issues. A real example (from an
+actual session; quoted verbatim, so the first line is the original Japanese prose — "Starting with Phase 1."
+The prose language is incidental: the leak signature is the stray `course` token followed by the
+`<invoke>` element):
 
 ```
 Phase 1 から着手します。

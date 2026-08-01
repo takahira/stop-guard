@@ -277,6 +277,7 @@ def last_assistant_turn(transcript_path: str) -> "tuple[str, str | list | None]"
     absent assistant turn -- so the guards allow the stop (never block).
     """
     content: "str | list | None" = None
+    current_id: "str | None" = None
     try:
         with open(transcript_path, "r", encoding="utf-8") as fh:
             for line in fh:
@@ -297,7 +298,26 @@ def last_assistant_turn(transcript_path: str) -> "tuple[str, str | list | None]"
                 msg = evt.get("message", evt)
                 if not isinstance(msg, dict):
                     continue
-                content = msg.get("content")
+                row_content = msg.get("content")
+                row_id = msg.get("id")
+                # Claude Code can split ONE assistant message across several JSONL
+                # rows -- one per content block -- that all carry the same
+                # `message.id`. Judging only the final row makes a `[thinking]` row
+                # followed by an empty `[text]` row look like an empty turn, so the
+                # guard blocks a normal completion and contradicts its own contract
+                # ("a thinking block means the turn is not empty"). Merge consecutive
+                # rows that share an id; rows without an id keep the previous
+                # one-row-per-turn behaviour.
+                if (
+                    row_id is not None
+                    and row_id == current_id
+                    and isinstance(content, list)
+                    and isinstance(row_content, list)
+                ):
+                    content = content + row_content
+                else:
+                    content = row_content
+                    current_id = row_id
     except (OSError, UnicodeDecodeError) as exc:
         # Read failure is fail-open (allow the stop), but make it observable --
         # otherwise it is indistinguishable from a genuinely clean turn.
@@ -471,6 +491,12 @@ def run_hook(stdin_text: str) -> int:
 # ---------------------------------------------------------------------------
 # CLI helpers (testing / corpus mining; not used in the hook path)
 # ---------------------------------------------------------------------------
+# Note on language: one sample below keeps its original Japanese prose line. These
+# fixtures are verbatim excerpts from the transcript corpus that motivated the
+# detector (see docs/issue-triage.md), and the surrounding prose is deliberately
+# unmodified so the sample still represents what the guard actually sees. Only the
+# stray token and the `<invoke>` element carry the leak signature; the prose
+# language is incidental to detection.
 _SELFTEST_SAMPLES = [
     ("clean prose", "All done. I ran the build and tests; everything passes.", False),
     (
