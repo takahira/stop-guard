@@ -67,6 +67,7 @@ def scan(root: str) -> tuple[list, list, set, int, int]:
         except OSError:
             file_mtime = 0.0
         try:
+            merger = _AssistantMerger()
             with fh:
                 for i, line in enumerate(fh):   # stream lines (transcripts can be large)
                     try:
@@ -77,23 +78,16 @@ def scan(root: str) -> tuple[list, list, set, int, int]:
                         except json.JSONDecodeError:
                             unparseable_lines += 1
                             continue
-                        if evt.get("type") != "assistant":
-                            continue
-                        msg = evt.get("message", evt)
-                        try:
-                            d = ig.leak_details(ig.content_to_text(msg.get("content")))
-                        except (AttributeError, TypeError):
+                        group = merger.feed(i, evt)
+                        if group is not None and not _record_leak(
+                                group, f, file_mtime, turns, sessions):
                             unparseable_lines += 1
-                            continue
-                        if not d["leak"]:
-                            continue
-                        sr = msg.get("stop_reason") or evt.get("stop_reason") or "null"
-                        turns.append({"file": f, "line": i, "signature": d["signature"],
-                                      "token": d["token"], "stop_reason": sr,
-                                      "mtime": file_mtime})
-                        sessions.add(f)
                     except (UnicodeDecodeError, AttributeError, TypeError):
                         unparseable_lines += 1
+                tail = merger.flush()
+                if tail is not None and not _record_leak(
+                        tail, f, file_mtime, turns, sessions):
+                    unparseable_lines += 1
         except (UnicodeDecodeError, OSError, AttributeError, TypeError):
             # A mid-file read error (e.g. invalid UTF-8 bytes encountered by the
             # iterator's __next__, a deleted file mid-walk, or a malformed message
@@ -190,6 +184,7 @@ def report(root: str) -> dict:
             skipped_files += 1
             continue
         try:
+            merger = _AssistantMerger()
             with fh:
                 for line in fh:
                     try:
@@ -201,11 +196,28 @@ def report(root: str) -> dict:
                             unparseable_lines += 1
                             continue
                         try:
-                            _classify_event(evt, f, categories, by_day, leak_by_stop,
-                                            sessions_hit, days_seen)
+                            # Non-assistant events are classified as they arrive;
+                            # assistant rows are held until their group is complete
+                            # so the report judges the same merged content the hook
+                            # would have.
+                            group = merger.feed(0, evt)
+                            if group is not None:
+                                _classify_assistant(group, f, categories, by_day,
+                                                    leak_by_stop, sessions_hit, days_seen)
+                            if not (isinstance(evt, dict)
+                                    and evt.get("type") == "assistant"):
+                                _classify_event(evt, f, categories, by_day, leak_by_stop,
+                                                sessions_hit, days_seen)
                         except (TypeError, AttributeError):
                             unparseable_lines += 1
                     except UnicodeDecodeError:
+                        unparseable_lines += 1
+                tail = merger.flush()
+                if tail is not None:
+                    try:
+                        _classify_assistant(tail, f, categories, by_day, leak_by_stop,
+                                            sessions_hit, days_seen)
+                    except (TypeError, AttributeError):
                         unparseable_lines += 1
         except (UnicodeDecodeError, OSError, AttributeError, TypeError):
             # A mid-file read error (e.g. invalid UTF-8 bytes encountered by the
@@ -234,6 +246,125 @@ def report(root: str) -> dict:
     }
 
 
+class _AssistantMerger:
+    """Coalesce JSONL rows that are ONE logical assistant message.
+
+    Claude Code can split a single assistant message across several rows sharing
+    one ``message.id`` -- one per content block, with the ``tool_result`` `user`
+    rows of a parallel tool call interleaved between them. ``stop_guard`` merges
+    them (see ``last_assistant_turn``); this scanner used to classify each ROW
+    independently, so the offline reliability report disagreed with the hook it
+    is supposed to be measuring:
+
+      - a `[thinking]` row followed by a whitespace-only `[text]` row counted a
+        false ``empty_end_turn`` the hook never raises, INFLATING the reported
+        false-positive rate;
+      - a stray token and a truncated invoke split across two text rows were
+        each clean in isolation, so a real ``invoke_leak`` the hook DOES catch
+        was missed entirely.
+
+    That report is the evidence for the guard's false-positive rate, so being
+    wrong in both directions matters more than the row count suggests.
+
+    Mirrors the hook exactly, including the two rules that look surprising:
+    a non-assistant row does NOT end a group (that is the parallel-tool-call
+    pattern), and rows without an id keep one-row-per-message behaviour.
+    """
+
+    def __init__(self):
+        self._cur = None
+
+    def feed(self, line_no, evt):
+        """Absorb one event; return a completed group, or None."""
+        if not isinstance(evt, dict) or evt.get("type") != "assistant":
+            return None
+        msg = evt.get("message", evt)
+        if not isinstance(msg, dict):
+            # An assistant row whose `message` is not an object is MALFORMED, not
+            # simply uninteresting. Raise so the caller counts it in
+            # unparseable_lines -- silently returning None would quietly shrink
+            # the denominator the reliability report is computed against.
+            raise TypeError("assistant row has a non-dict message")
+        row_content = msg.get("content")
+        row_id = msg.get("id")
+        cur = self._cur
+        if (
+            row_id is not None
+            and cur is not None
+            and row_id == cur["id"]
+            and isinstance(cur["content"], list)
+            and isinstance(row_content, list)
+        ):
+            cur["content"] = cur["content"] + row_content
+            # Keep the LAST row's stop_reason/timestamp: that is the row the hook
+            # would have judged, and the one carrying the turn's real outcome.
+            cur["evt"] = evt
+            cur["msg"] = msg
+            return None
+        done = cur
+        self._cur = {"line": line_no, "id": row_id, "content": row_content,
+                     "evt": evt, "msg": msg}
+        return done
+
+    def flush(self):
+        done, self._cur = self._cur, None
+        return done
+
+
+def _record_leak(group, f, file_mtime, turns, sessions) -> bool:
+    """Append a leak record for one MERGED assistant message. False on bad data."""
+    msg, evt = group["msg"], group["evt"]
+    try:
+        d = ig.leak_details(ig.content_to_text(group["content"]))
+    except (AttributeError, TypeError):
+        return False
+    if d["leak"]:
+        sr = msg.get("stop_reason") or evt.get("stop_reason") or "null"
+        turns.append({"file": f, "line": group["line"], "signature": d["signature"],
+                      "token": d["token"], "stop_reason": sr, "mtime": file_mtime})
+        sessions.add(f)
+    return True
+
+
+def _assistant_buckets(content, msg, evt, hit, leak_by_stop):
+    """The assistant classification, in ONE place.
+
+    Both the merged path and the single-event path route through here, so the
+    scanner's report cannot drift from itself the way it drifted from the hook.
+    """
+    det = ig.leak_details(ig.content_to_text(content))
+    if det["leak"]:
+        sr = msg.get("stop_reason") or evt.get("stop_reason") or "null"
+        hit("invoke_leak")
+        leak_by_stop[sr] += 1
+    elif ig.is_empty_turn(content):
+        sr = msg.get("stop_reason") or evt.get("stop_reason") or "null"
+        # The Stop hook only fires on end_turn-equivalent stops; treat
+        # null/missing stop_reason as end_turn to match that scope.
+        if sr in ("end_turn", "null"):
+            hit("empty_end_turn")
+
+
+def _classify_assistant(group, f, categories, by_day, leak_by_stop, sessions_hit,
+                        days_seen):
+    """Classify one MERGED assistant message into the report buckets."""
+    evt, msg = group["evt"], group["msg"]
+    d = _day(evt.get("timestamp"))
+    if d:
+        days_seen.add(d)
+
+    def hit(cat: str):
+        categories[cat] += 1
+        if d:
+            by_day[d][cat] += 1
+        sessions_hit[cat].add(f)
+
+    if evt.get("isApiErrorMessage") is True:
+        hit("api_error")
+        return
+    _assistant_buckets(group["content"], msg, evt, hit, leak_by_stop)
+
+
 def _classify_event(evt, f, categories, by_day, leak_by_stop, sessions_hit, days_seen):
     """Classify one transcript event into the report buckets (in place)."""
     msg = evt.get("message", evt)
@@ -259,18 +390,10 @@ def _classify_event(evt, f, categories, by_day, leak_by_stop, sessions_hit, days
         return
 
     if t == "assistant":
-        content = msg.get("content")
-        det = ig.leak_details(ig.content_to_text(content))
-        if det["leak"]:
-            sr = msg.get("stop_reason") or evt.get("stop_reason") or "null"
-            hit("invoke_leak")
-            leak_by_stop[sr] += 1
-        elif ig.is_empty_turn(content):
-            sr = msg.get("stop_reason") or evt.get("stop_reason") or "null"
-            # The Stop hook only fires on end_turn-equivalent stops; treat
-            # null/missing stop_reason as end_turn to match that scope.
-            if sr in ("end_turn", "null"):
-                hit("empty_end_turn")
+        # Single-event classification (no merge): report() routes assistant rows
+        # through _classify_assistant instead, so this path only runs for direct
+        # callers judging one event in isolation.
+        _assistant_buckets(msg.get("content"), msg, evt, hit, leak_by_stop)
 
 
 def _print_report(root: str) -> int:

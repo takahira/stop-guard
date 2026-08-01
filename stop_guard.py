@@ -56,6 +56,9 @@ Config (env vars)
                                     ~/.claude/stop-guard.log). Detections are
                                     always appended here (best-effort).
 - ``STOP_GUARD_NOLOG=1``       -- disable the detection log.
+- ``STOP_GUARD_LOG_PATHS=1``   -- record the RAW session id and transcript path
+                                    in the log (default: a stable correlation id,
+                                    so no username or project path is stored).
 - ``STOP_GUARD_DEBUG=1``       -- log decisions to stderr.
 
 CLI (no stdin) for testing / corpus mining
@@ -69,6 +72,7 @@ from __future__ import annotations
 import argparse
 import collections
 import functools
+import hashlib
 import json
 import os
 import re
@@ -410,16 +414,52 @@ def _log_path():
     )
 
 
+def _corr_id(value):
+    """A stable correlation id for a value that must not be stored verbatim.
+
+    The detection log used to record the absolute transcript path and the raw
+    session id. Neither is needed to make -- or to audit -- a blocking decision,
+    but a path like ``/Users/<name>/work/<client>/...`` puts a username and
+    private project names into a file that travels in support bundles, backups
+    and shared machines. A truncated digest keeps the only property the log
+    actually uses (records from one session group together) and drops the rest.
+
+    This is a correlation id, NOT a secret: the input space of paths is small
+    enough to brute-force if someone already knows what to look for. Use
+    STOP_GUARD_LOG_PATHS=1 when you genuinely need the raw values for diagnosis.
+    """
+    if not value:
+        return None
+    return hashlib.sha256(str(value).encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def _detection_record(record: dict) -> dict:
+    """Apply the log's privacy policy to one record before it is written."""
+    if os.environ.get("STOP_GUARD_LOG_PATHS"):
+        return record
+    out = dict(record)
+    if "session_id" in out:
+        out["session"] = _corr_id(out.pop("session_id"))
+    if "transcript" in out:
+        out["transcript_id"] = _corr_id(out.pop("transcript"))
+    return out
+
+
 def _log_detection(record: dict):
     """Append one JSON detection record to the log (best-effort, fail-open)."""
     if os.environ.get("STOP_GUARD_NOLOG"):
         return
     path = _log_path()
+    record = _detection_record(record)
     try:
         parent = os.path.dirname(path)
         if parent:  # empty when STOP_GUARD_LOG is a bare filename (cwd-relative)
             os.makedirs(parent, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as fh:
+        # 0600 on creation: the log records when an agent leaked a tool-call tag,
+        # which is not something other local users need to read. An existing
+        # file's mode is left alone -- the operator may have chosen it.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     except OSError as exc:
         # A detection we failed to record is dangerous in observe mode: the

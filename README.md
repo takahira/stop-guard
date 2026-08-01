@@ -160,8 +160,9 @@ corpus before trusting it.
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `STOP_GUARD_OBSERVE=1` | off | Observe mode: detect and log, but **never block**. Use this to dogfood the hook for a few days and confirm zero false positives before switching to blocking mode. |
-| `STOP_GUARD_LOG=PATH` | `~/.claude/stop-guard.log` | Path for the detection log. Detections are always appended here (best-effort). |
+| `STOP_GUARD_LOG=PATH` | `~/.claude/stop-guard.log` | Path for the detection log. Detections are always appended here (best-effort). Created `0600`. |
 | `STOP_GUARD_NOLOG=1` | off | Disable the detection log entirely. |
+| `STOP_GUARD_LOG_PATHS=1` | off | Record the raw session id and transcript path in the detection log. Off by default: a path like `/Users/<name>/work/<client>/…` carries a username and private project names into a file that travels in support bundles and backups, and neither value is needed to make or audit a blocking decision. By default each is replaced with a stable 12-hex correlation id, so records from one session still group together. |
 | `STOP_GUARD_NO_EMPTY_TURN=1` | off | Disable Guard 2 (empty/zero-content end_turn). Guard 1 (invoke-leak) stays active. |
 | `STOP_GUARD_DISABLE=1` | off | Disable both guards entirely (the hook becomes a no-op). |
 | `STOP_GUARD_TOKENS` | `count,call,court,course,invoke` | Override the stray-token list. Comma-separated; replaces the built-in set entirely. |

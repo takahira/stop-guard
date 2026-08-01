@@ -3,6 +3,8 @@
 import io
 import json
 import os
+import stat
+import shutil
 import sys
 import tempfile
 import unittest
@@ -454,8 +456,14 @@ class ObserveAndLogging(unittest.TestCase):
             with open(log, encoding="utf-8") as fh:
                 rec = json.loads(fh.read().splitlines()[0])
             self.assertEqual(rec["action"], "observe")
-            self.assertEqual(rec["session_id"], "sess-1")
             self.assertEqual(rec["token"], "court")
+            # The raw session id and transcript path are NOT stored by default
+            # (they carry a username and private project names); a stable
+            # correlation id takes their place.
+            self.assertNotIn("session_id", rec)
+            self.assertNotIn("transcript", rec)
+            self.assertEqual(rec["session"], ig._corr_id("sess-1"))
+            self.assertTrue(rec["transcript_id"])
 
     def test_block_mode_also_logs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1088,3 +1096,161 @@ class ParallelToolCallRowsMerge(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DetectionLogPrivacy(unittest.TestCase):
+    """#4: the detection log stored the absolute transcript path and the raw
+    session id. Neither is needed for -- or for auditing -- a blocking decision,
+    and a path like /Users/<name>/work/<client>/... exposes a username and
+    private project names through support bundles, backups and shared machines."""
+
+    PAYLOAD = {"hook_event_name": "Stop", "stop_hook_active": False,
+               "session_id": "sess-private"}
+
+    def _detect(self, env_extra):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        log = os.path.join(tmp, "guard.log")
+        payload = dict(self.PAYLOAD)
+        payload["transcript_path"] = os.path.join(FIX, "leaked_endturn.jsonl")
+        env = {"STOP_GUARD_LOG": log, "STOP_GUARD_OBSERVE": "1"}
+        env.update(env_extra)
+        _run_hook(payload, env=env)
+        with open(log, encoding="utf-8") as fh:
+            return log, json.loads(fh.read().splitlines()[0]), fh
+
+    def test_no_username_or_project_path_reaches_the_log(self):
+        log, rec, _ = self._detect({})
+        blob = open(log, encoding="utf-8").read()
+        self.assertNotIn(FIX, blob)
+        self.assertNotIn("sess-private", blob)
+        self.assertNotIn(os.path.expanduser("~"), blob)
+
+    def test_correlation_ids_are_stable_so_records_still_group(self):
+        """Dropping the raw values must not cost the log its only real use:
+        telling which detections belong to the same session."""
+        _log1, rec1, _ = self._detect({})
+        _log2, rec2, _ = self._detect({})
+        self.assertEqual(rec1["session"], rec2["session"])
+        self.assertEqual(rec1["transcript_id"], rec2["transcript_id"])
+        self.assertNotEqual(rec1["session"], rec1["transcript_id"])
+
+    def test_opt_in_restores_the_raw_values_for_diagnosis(self):
+        _log, rec, _ = self._detect({"STOP_GUARD_LOG_PATHS": "1"})
+        self.assertEqual(rec["session_id"], "sess-private")
+        self.assertTrue(rec["transcript"].endswith("leaked_endturn.jsonl"))
+
+    def test_log_is_created_user_only(self):
+        log, _rec, _ = self._detect({})
+        mode = stat.S_IMODE(os.stat(log).st_mode)
+        self.assertEqual(mode & 0o077, 0,
+                         "detection log is readable by other local users: %o" % mode)
+
+
+class ScannerAppliesTheSplitRowMerge(unittest.TestCase):
+    """#4: the hook merges JSONL rows sharing one `message.id`; the corpus
+    scanner classified each row independently. That made the offline reliability
+    report disagree with the very hook it is the evidence for -- wrong in BOTH
+    directions, so neither error cancels the other out."""
+
+    def _corpus(self, rows):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        with open(os.path.join(tmp, "t.jsonl"), "w", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
+        return tmp
+
+    @staticmethod
+    def _row(mid, blocks, stop="end_turn"):
+        return {"type": "assistant", "timestamp": "2026-06-20T10:00:00Z",
+                "message": {"id": mid, "role": "assistant", "content": blocks},
+                "stop_reason": stop}
+
+    def test_thinking_plus_blank_text_is_not_a_false_empty_turn(self):
+        """A `[thinking]` row followed by a whitespace-only `[text]` row is ONE
+        non-empty message. Counting it as empty INFLATED the reported
+        false-positive rate with a block the hook never makes."""
+        rows = [self._row("msg_A", [{"type": "thinking", "thinking": "hmm"}]),
+                self._row("msg_A", [{"type": "text", "text": "   "}])]
+        self.assertFalse(ig.is_empty_turn(
+            [{"type": "thinking", "thinking": "hmm"}, {"type": "text", "text": "   "}]),
+            "precondition: the hook treats a thinking block as a non-empty turn")
+
+        r = scan_corpus.report(self._corpus(rows))
+        self.assertEqual(r["categories"]["empty_end_turn"], 0)
+
+    def test_a_leak_split_across_rows_is_still_found(self):
+        """A stray token and a truncated invoke split across two text rows are
+        each clean in isolation, so a real leak the hook DOES catch was missed --
+        under-reporting the problem the guard exists for."""
+        # The stray boundary token lands in one row and the invoke construct in
+        # the next -- the shape a split assistant message actually takes.
+        blocks_a = [{"type": "text", "text": "Resuming the loop tick.\n\ncourt"}]
+        blocks_b = [{"type": "text", "text": '<invoke name="Bash">\n'
+                                             '<parameter name="command">ls</parameter>\n'
+                                             "</invoke>"}]
+        self.assertTrue(
+            ig.leak_details(ig.content_to_text(blocks_a + blocks_b))["leak"],
+            "precondition: the hook sees a leak in the MERGED text")
+        self.assertFalse(ig.leak_details(ig.content_to_text(blocks_a))["leak"],
+                         "precondition: row A alone is clean")
+
+        # NOTE: the COUNT alone cannot show the merge happened -- row B on its
+        # own already trips the weaker `bare-invoke-element` signature, so an
+        # unmerged scan also reports exactly one leak. The SIGNATURE is the
+        # evidence: only the merged text carries the stray token, and only the
+        # merged verdict matches what the hook would have decided.
+        root = self._corpus(rows := [self._row("msg_B", blocks_a),
+                                     self._row("msg_B", blocks_b)])
+        _files, turns, _sess, _skip, _bad = scan_corpus.scan(root)
+        self.assertEqual(len(turns), 1)
+        self.assertEqual(turns[0]["signature"], "stray-token+invoke")
+        self.assertEqual(turns[0]["token"], "court")
+
+        r = scan_corpus.report(root)
+        self.assertEqual(r["categories"]["invoke_leak"], 1)
+
+    def test_a_leak_only_visible_when_rows_are_merged(self):
+        """The under-report in its pure form: the invoke construct itself is
+        split, so NEITHER row is a leak alone and an unmerged scan reports zero."""
+        # A stray token, then a TRUNCATED invoke -- the model stopped mid-tag.
+        # Neither half trips on its own; only the merged text does.
+        blocks_a = [{"type": "text", "text": "Resuming the loop tick.\n\ncourt"}]
+        blocks_b = [{"type": "text", "text": '<invoke name="Bash">'}]
+        self.assertFalse(ig.leak_details(ig.content_to_text(blocks_a))["leak"])
+        self.assertFalse(ig.leak_details(ig.content_to_text(blocks_b))["leak"])
+        self.assertTrue(ig.leak_details(ig.content_to_text(blocks_a + blocks_b))["leak"])
+
+        root = self._corpus([self._row("msg_F", blocks_a), self._row("msg_F", blocks_b)])
+        _files, turns, _sess, _skip, _bad = scan_corpus.scan(root)
+        self.assertEqual(len(turns), 1, "a real leak the hook catches was missed")
+        self.assertEqual(scan_corpus.report(root)["categories"]["invoke_leak"], 1)
+
+    def test_interleaved_tool_result_rows_do_not_split_a_message(self):
+        """A parallel tool call writes one assistant message as several rows with
+        `user` tool_result rows BETWEEN them. Those rows are the same logical
+        message -- verified across 5,771 real transcripts -- so a non-assistant
+        row must not end the group."""
+        rows = [
+            self._row("msg_C", [{"type": "thinking", "thinking": "plan"}]),
+            {"type": "user", "timestamp": "2026-06-20T10:00:01Z",
+             "message": {"role": "user",
+                         "content": [{"type": "tool_result", "content": "ok"}]}},
+            self._row("msg_C", [{"type": "text", "text": "  "}]),
+        ]
+        r = scan_corpus.report(self._corpus(rows))
+        self.assertEqual(r["categories"]["empty_end_turn"], 0)
+
+    def test_rows_without_an_id_keep_one_row_per_message(self):
+        """No id means no merge -- otherwise unrelated turns would fuse."""
+        rows = [self._row(None, [{"type": "text", "text": "done"}]),
+                self._row(None, [{"type": "text", "text": "   "}])]
+        r = scan_corpus.report(self._corpus(rows))
+        self.assertEqual(r["categories"]["empty_end_turn"], 1)
+
+    def test_distinct_ids_are_not_merged(self):
+        rows = [self._row("msg_D", [{"type": "thinking", "thinking": "x"}]),
+                self._row("msg_E", [{"type": "text", "text": " "}])]
+        r = scan_corpus.report(self._corpus(rows))
+        self.assertEqual(r["categories"]["empty_end_turn"], 1)
