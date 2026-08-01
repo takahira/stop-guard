@@ -984,5 +984,107 @@ class SplitRowAssistantTurn(unittest.TestCase):
             self.assertTrue(ig.is_empty_turn(content))
 
 
+class UnknownBlockIsNotEmpty(unittest.TestCase):
+    """An unrecognised content block must count as content, not as emptiness.
+
+    The block-type set is open and already contains real server-side kinds. A
+    turn whose only content was a web search used to be judged empty and blocked
+    -- precisely the spurious retry this guard exists to prevent.
+    """
+
+    def test_real_server_side_blocks_are_not_empty(self):
+        for btype in ("server_tool_use", "web_search_tool_result"):
+            with self.subTest(btype=btype):
+                self.assertFalse(ig.is_empty_turn([{"type": btype, "id": "x"}]))
+
+    def test_block_type_this_version_never_heard_of_is_not_empty(self):
+        self.assertFalse(ig.is_empty_turn([{"type": "some_future_block"}]))
+
+    def test_unparseable_block_is_not_empty(self):
+        self.assertFalse(ig.is_empty_turn([42]))
+
+    def test_whitespace_text_only_is_still_empty(self):
+        # The narrowing must not cost the guard its actual job.
+        self.assertTrue(ig.is_empty_turn([{"type": "text", "text": "   "}]))
+        self.assertTrue(ig.is_empty_turn([]))
+
+
+class MalformedTrailingRowFailsOpen(unittest.TestCase):
+    """A row we cannot parse makes the tail ambiguous -> allow the stop.
+
+    Skipping it silently left `content` holding an EARLIER turn, so a truncated
+    row after a clean completion made the guard block on a leak the user had
+    already moved past.
+    """
+
+    @staticmethod
+    def _leaked_row():
+        return json.dumps({"type": "assistant", "message": {
+            "role": "assistant", "id": "msg_old",
+            "content": [{"type": "text", "text": 'court\n<invoke name="Bash">'}]},
+            "stop_reason": "end_turn"})
+
+    def _write(self, tmp, body):
+        path = os.path.join(tmp, "t.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        return path
+
+    def test_truncated_last_row_does_not_resurrect_an_older_leak(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, self._leaked_row() + "\n"
+                               + '{"type":"assistant","message":{"content":[{"type":"tex'
+                               + "\n")
+            text, content = ig.last_assistant_turn(path)
+            self.assertEqual((text, content), ("", None),
+                             "ambiguous tail must not expose an earlier turn")
+            code, out = _run_hook(
+                {"hook_event_name": "Stop", "stop_hook_active": False,
+                 "transcript_path": path}, env={"STOP_GUARD_NOLOG": "1"})
+            self.assertEqual(code, 0)
+            self.assertEqual(out.strip(), "", "ambiguity must allow the stop")
+
+    def test_a_later_valid_row_supersedes_the_malformed_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, self._leaked_row() + "\n"
+                               + "{not json\n"
+                               + json.dumps({"type": "assistant", "message": {
+                                   "role": "assistant", "id": "msg_new",
+                                   "content": [{"type": "text", "text": "All done."}]},
+                                   "stop_reason": "end_turn"}) + "\n")
+            _text, content = ig.last_assistant_turn(path)
+            self.assertEqual(content, [{"type": "text", "text": "All done."}])
+
+
+class ParallelToolCallRowsMerge(unittest.TestCase):
+    """Invariant: a non-assistant row must NOT end a merge run.
+
+    One assistant message that issues parallel tool calls is written as several
+    rows with the tool_result `user` rows interleaved. Measured across 5,771 real
+    transcripts / 133,922 assistant rows: every id reappearing after a
+    non-assistant row (8,956 cases) was this pattern, never two distinct turns.
+    """
+
+    def test_rows_split_by_a_tool_result_still_merge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "t.jsonl")
+            rows = [
+                json.dumps({"type": "assistant", "message": {
+                    "role": "assistant", "id": "msg_1",
+                    "content": [{"type": "tool_use", "id": "a", "name": "Bash"}]}}),
+                json.dumps({"type": "user", "message": {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "a"}]}}),
+                json.dumps({"type": "assistant", "message": {
+                    "role": "assistant", "id": "msg_1",
+                    "content": [{"type": "tool_use", "id": "b", "name": "Read"}]}}),
+            ]
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(rows) + "\n")
+            _text, content = ig.last_assistant_turn(path)
+            self.assertEqual(len(content), 2,
+                             "parallel tool calls are ONE message and must merge")
+
+
 if __name__ == "__main__":
     unittest.main()

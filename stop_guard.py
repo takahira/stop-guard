@@ -152,9 +152,6 @@ EMPTY_TURN_REASON = (
     "Complete the task, or state explicitly why you are stopping."
 )
 
-# Content block types that count as "thinking" for the empty-turn check.
-_THINKING_TYPES = ("thinking", "redacted_thinking")
-
 
 def _strip_code(text: str) -> str:
     text = _FENCE_RE.sub(" ", text)            # closed ```...``` blocks
@@ -287,6 +284,15 @@ def last_assistant_turn(transcript_path: str) -> "tuple[str, str | list | None]"
                 try:
                     evt = json.loads(line)
                 except json.JSONDecodeError:
+                    # A row we cannot parse makes the tail of the transcript
+                    # AMBIGUOUS. Silently skipping it left `content` holding an
+                    # EARLIER turn, so a truncated row after a clean completion
+                    # made the guard block on a leak that belonged to a turn the
+                    # user had already moved past. Ambiguity must allow the stop,
+                    # so drop what we have; a later well-formed assistant row
+                    # supersedes this and restores the verdict.
+                    content = None
+                    current_id = None
                     continue
                 # Defensive: json.loads accepts any JSON value, so a line holding
                 # `null`, a number, or a list parses fine but has no .get(). The
@@ -308,6 +314,14 @@ def last_assistant_turn(transcript_path: str) -> "tuple[str, str | list | None]"
                 # ("a thinking block means the turn is not empty"). Merge consecutive
                 # rows that share an id; rows without an id keep the previous
                 # one-row-per-turn behaviour.
+                #
+                # Non-assistant rows deliberately do NOT reset `current_id`: one
+                # assistant message that issues PARALLEL tool calls is written as
+                # several rows with the tool_result `user` rows interleaved between
+                # them, so those rows are the same logical message and must merge.
+                # Verified across 5,771 real transcripts / 133,922 assistant rows:
+                # every id that reappeared after a non-assistant row (8,956 cases)
+                # was this parallel-tool-call pattern, never two distinct turns.
                 if (
                     row_id is not None
                     and row_id == current_id
@@ -344,8 +358,15 @@ def is_empty_turn(content: "str | list | None") -> bool:
     redacted_thinking block. Detection logic is consistent with the reliability
     report in scan_corpus.py.
     A real text-only final answer has non-whitespace text and is NOT empty.
-    Unknown block types (e.g. a hypothetical image block) are treated as absent
-    and do not by themselves prevent the empty verdict.
+
+    An UNRECOGNISED block type counts as actionable, i.e. NOT empty. This used to
+    go the other way, described as covering "a hypothetical image block" -- but
+    the set of block types is open and already contains real server-side kinds
+    (``server_tool_use``, ``web_search_tool_result``). A turn whose only content
+    was a web search was judged empty and blocked, which is exactly the spurious
+    retry this guard exists to avoid. Ignoring an unknown block can only ever
+    manufacture a false positive; treating it as content can only ever let a
+    genuinely empty turn through, and that is the safe direction here.
     """
     if content is None:
         return False  # cannot judge -> not empty (fail-open: never block)
@@ -359,14 +380,15 @@ def is_empty_turn(content: "str | list | None") -> bool:
                 return False
             continue
         if not isinstance(block, dict):
-            continue
+            return False  # unparseable block: assume content, never block
         btype = block.get("type")
-        if btype == "text" and (block.get("text") or "").strip():
-            return False
-        if btype == "tool_use":
-            return False
-        if btype in _THINKING_TYPES:
-            return False
+        if btype == "text":
+            if (block.get("text") or "").strip():
+                return False
+            continue  # a whitespace-only text block really is empty
+        # Anything that is not a text block -- tool_use, thinking, or a type this
+        # version has never heard of -- is actionable content.
+        return False
     return True
 
 
