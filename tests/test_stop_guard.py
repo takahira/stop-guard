@@ -1094,10 +1094,6 @@ class ParallelToolCallRowsMerge(unittest.TestCase):
                              "parallel tool calls are ONE message and must merge")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class DetectionLogPrivacy(unittest.TestCase):
     """#4: the detection log stored the absolute transcript path and the raw
     session id. Neither is needed for -- or for auditing -- a blocking decision,
@@ -1254,3 +1250,7 @@ class ScannerAppliesTheSplitRowMerge(unittest.TestCase):
                 self._row("msg_E", [{"type": "text", "text": " "}])]
         r = scan_corpus.report(self._corpus(rows))
         self.assertEqual(r["categories"]["empty_end_turn"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
