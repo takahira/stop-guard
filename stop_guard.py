@@ -120,6 +120,7 @@ _INDENT_CODE_RE = re.compile(r"(?m)^(?:[ ]{4}|\t).*$")
 # insensitively, so terminality/completeness checks must recognise a capitalised
 # closing tag too (otherwise a capitalised close defeats the terminal guard).
 _CLOSE_RE = re.compile(r"</invoke>", re.IGNORECASE)
+_PARAMETER_CLOSE_RE = re.compile(r"</parameter>", re.IGNORECASE)
 
 # Signature A: a stray boundary token alone on a line, immediately followed by a
 # bare <invoke ...> opening tag. This is the canonical corruption fingerprint.
@@ -169,15 +170,63 @@ def _tail_is_blank(stripped: str, pos: int) -> bool:
     return stripped[pos:].strip() == ""
 
 
+def _invoke_body_is_terminal_prefix(stripped: str, pos: int) -> bool:
+    """True when an unclosed invoke body ends within parameter markup.
+
+    A leaked call can stop after the complete ``<invoke>`` opener but before its
+    closing tag -- including midway through a ``<parameter>`` tag or value.  To
+    distinguish that from prose teaching an unclosed opener, require the first
+    non-whitespace body content to be a (possibly truncated) ``<parameter>`` and
+    allow only further parameter elements after each complete parameter.
+    """
+    parameter_open = "<parameter"
+    invoke_close = "</invoke>"
+    end = len(stripped)
+    while pos < end and stripped[pos].isspace():
+        pos += 1
+    while pos < end:
+        remaining = end - pos
+        if (
+            remaining <= len(invoke_close)
+            and invoke_close.startswith(stripped[pos:end].lower())
+        ):
+            return True  # closing tag itself was truncated at end-of-turn
+        if remaining < len(parameter_open):
+            # A parameter tag cut midway through its name is still a valid
+            # prefix, but arbitrary trailing text is not.
+            return parameter_open.startswith(stripped[pos:end].lower())
+        if stripped[pos:pos + len(parameter_open)].lower() != parameter_open:
+            return False
+
+        after_name = pos + len(parameter_open)
+        if (
+            after_name < end
+            and not (stripped[after_name].isspace() or stripped[after_name] in ">/")
+        ):
+            return False  # e.g. prose beginning with <parameterized
+        gt = stripped.find(">", after_name)
+        if gt == -1:
+            return True  # parameter opener/attributes truncated
+        if stripped[gt - 1] == "/":
+            pos = gt + 1
+        else:
+            m_parameter_close = _PARAMETER_CLOSE_RE.search(stripped, gt + 1)
+            if m_parameter_close is None:
+                return True  # parameter value or closing tag truncated
+            pos = m_parameter_close.end()
+        while pos < end and stripped[pos].isspace():
+            pos += 1
+    return True
+
+
 def _stray_is_terminal(stripped: str, m: "re.Match") -> bool:
     """A signature-A hit is terminal iff its ``<invoke>`` ends the turn.
 
     Closed element: terminal when only whitespace follows ``</invoke>``.
-    Unclosed opener (no ``</invoke>``): a *truncated* leak, terminal only when
-    the opener tag itself is the tail -- i.e. nothing but whitespace follows its
-    ``>`` (or the tag is cut mid-attribute, so there is no ``>`` yet). Prose that
-    *teaches* an unclosed ``<invoke ...>`` keeps explaining afterwards, so it is
-    not terminal and must not trip.
+    Unclosed opener (no ``</invoke>``): a *truncated* leak, terminal when the
+    opener or its parameter-only body is cut off at the tail. Prose that
+    *teaches* an unclosed ``<invoke ...>`` keeps explaining outside parameter
+    markup, so it is not terminal and must not trip.
     """
     m_close = _CLOSE_RE.search(stripped, m.end())
     if m_close is not None:
@@ -185,7 +234,7 @@ def _stray_is_terminal(stripped: str, m: "re.Match") -> bool:
     gt = stripped.find(">", m.end())
     if gt == -1:
         return True  # opener truncated mid-attribute = the tail
-    return _tail_is_blank(stripped, gt + 1)
+    return _invoke_body_is_terminal_prefix(stripped, gt + 1)
 
 
 def _terminal_bare_match(stripped: str):
@@ -265,7 +314,9 @@ def _content_to_text(content: "str | list | None") -> str:
 content_to_text = _content_to_text
 
 
-def last_assistant_turn(transcript_path: str) -> "tuple[str, str | list | None]":
+def last_assistant_turn(
+    transcript_path: str, *, fail_open: bool = True
+) -> "tuple[str, str | list | None]":
     """Return ``(text, content)`` of the last assistant turn in ONE transcript pass.
 
     ``text`` is the flattened text channel (leak guard); ``content`` is the raw
@@ -274,8 +325,10 @@ def last_assistant_turn(transcript_path: str) -> "tuple[str, str | list | None]"
     turn, so a stale leak from an earlier turn never causes a false-positive
     block when the final turn is actually clean.
 
-    Reads fail-open: any error yields ``("", None)`` -- the same values as an
-    absent assistant turn -- so the guards allow the stop (never block).
+    Reads fail-open by default: any error yields ``("", None)`` -- the same
+    values as an absent assistant turn -- so the guards allow the stop (never
+    block). CLI validation passes ``fail_open=False`` so an unreadable transcript
+    cannot be reported as clean.
     """
     content: "str | list | None" = None
     current_id: "str | None" = None
@@ -307,6 +360,11 @@ def last_assistant_turn(transcript_path: str) -> "tuple[str, str | list | None]"
                     continue
                 msg = evt.get("message", evt)
                 if not isinstance(msg, dict):
+                    # Like an unparseable row, an assistant row whose message is
+                    # not an object makes the transcript tail ambiguous. Do not
+                    # leave an earlier turn in place and block on stale content.
+                    content = None
+                    current_id = None
                     continue
                 row_content = msg.get("content")
                 row_id = msg.get("id")
@@ -337,8 +395,10 @@ def last_assistant_turn(transcript_path: str) -> "tuple[str, str | list | None]"
                     content = row_content
                     current_id = row_id
     except (OSError, UnicodeDecodeError) as exc:
-        # Read failure is fail-open (allow the stop), but make it observable --
-        # otherwise it is indistinguishable from a genuinely clean turn.
+        if not fail_open:
+            raise
+        # Hook reads fail-open (allow the stop), but make the failure observable
+        # in debug mode rather than silently treating it as a clean turn.
         _debug(f"could not read transcript {transcript_path!r}: {exc}; failing open")
         return "", None
     return _content_to_text(content), content
@@ -618,7 +678,14 @@ def _cmd_scan(path: str) -> int:
         print(json.dumps({"path": path, "leak": False, "signature": None,
                           "error": "file not found"}, ensure_ascii=False))
         return 1
-    text = last_assistant_text(path)
+    try:
+        text, _content = last_assistant_turn(path, fail_open=False)
+    except (OSError, UnicodeDecodeError) as exc:
+        error = f"could not read transcript: {exc}"
+        print(f"[stop-guard] WARNING: {error}: {path!r}", file=sys.stderr)
+        print(json.dumps({"path": path, "leak": False, "signature": None,
+                          "error": error}, ensure_ascii=False))
+        return 1
     is_leak, sig = detect_leak(text, _tokens_from_env())
     print(json.dumps({"path": path, "leak": is_leak, "signature": sig}, ensure_ascii=False))
     return 0

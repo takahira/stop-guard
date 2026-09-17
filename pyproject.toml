@@ -53,14 +53,16 @@ Issues = "https://github.com/takahira/stop-guard/issues"
 [tool.hatch.version]
 path = "stop_guard.py"
 
-# Single-module distribution: ship the one importable module that holds both the
-# hook and the CLI. scan_corpus.py is a maintenance tool, not part of the package.
+# The wheel is a single importable module holding the hook and CLI. scan_corpus.py
+# remains a maintenance tool, but the sdist includes it because the shipped test
+# suite imports and exercises it.
 [tool.hatch.build.targets.wheel]
 only-include = ["stop_guard.py"]
 
 [tool.hatch.build.targets.sdist]
 include = [
     "stop_guard.py",
+    "scan_corpus.py",
     "tests/",
     "README.md",
     "LICENSE",

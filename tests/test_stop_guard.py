@@ -8,7 +8,7 @@ import shutil
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -85,6 +85,19 @@ class DetectLeak(unittest.TestCase):
         ok, _ = ig.detect_leak('boom\n<invoke name="Bash">', tokens=("boom",))
         self.assertTrue(ok)
 
+    def test_truncated_invoke_bodies_are_detected(self):
+        samples = (
+            'court\n<invoke name="Bash">\n<parameter name="command">ls</parameter>',
+            'court\n<invoke name="Bash">\n<parameter name="comm',
+            'court\n<invoke name="Bash">\n<parameter name="command">ls',
+            'court\n<invoke name="Bash">\n<parameter name="command">ls</par',
+            'court\n<invoke name="Bash">\n<parameter name="command">ls</parameter>\n<par',
+            'court\n<invoke name="Bash">\n<parameter name="command">ls</parameter>\n</inv',
+        )
+        for text in samples:
+            with self.subTest(text=text):
+                self.assertEqual(ig.detect_leak(text), (True, "stray-token+invoke"))
+
 
 class FalsePositiveGuards(unittest.TestCase):
     """A real leak is terminal (the model emitted the call and stopped). Prose
@@ -128,6 +141,13 @@ class FalsePositiveGuards(unittest.TestCase):
         # end the turn).
         ok, _ = ig.detect_leak(
             'バグはこう見えます。\ncount\n<invoke name="Bash"> ... と続きます。これが問題。')
+        self.assertFalse(ok)
+
+    def test_complete_parameter_followed_by_prose_not_flagged(self):
+        ok, _ = ig.detect_leak(
+            'Example:\ncount\n<invoke name="Bash">\n'
+            '<parameter name="command">ls</parameter>\n'
+            'then the invoke would normally be closed.')
         self.assertFalse(ok)
 
     def test_terminal_leak_still_flagged(self):
@@ -231,6 +251,22 @@ class MalformedTranscriptLines(unittest.TestCase):
                 code = ig.main(["--scan", path])
             self.assertEqual(code, 0)
             self.assertTrue(json.loads(buf.getvalue())["leak"])
+
+    def test_scan_cli_reports_existing_unreadable_inputs_as_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_utf8 = os.path.join(tmp, "bad_utf8.jsonl")
+            with open(bad_utf8, "wb") as fh:
+                fh.write(b"\xff\xfe")
+            for path in (bad_utf8, tmp):
+                with self.subTest(path=path):
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with redirect_stdout(stdout), redirect_stderr(stderr):
+                        code = ig.main(["--scan", path])
+                    result = json.loads(stdout.getvalue())
+                    self.assertEqual(code, 1)
+                    self.assertIn("error", result)
+                    self.assertIn("WARNING", stderr.getvalue())
 
 
 class SinglePassExtraction(unittest.TestCase):
@@ -585,6 +621,25 @@ class ScanCorpus(unittest.TestCase):
             summary = scan_corpus.summarize(*res)
             self.assertEqual(summary["unparseable_lines"], 1)
             self.assertEqual(summary["corrupted_turns"], 0)
+
+    def test_empty_or_missing_root_exits_nonzero_in_all_output_modes(self):
+        with tempfile.TemporaryDirectory() as empty:
+            missing = os.path.join(empty, "missing")
+            cases = (
+                ["--root", missing],
+                ["--root", missing, "--json"],
+                ["--root", empty, "--report"],
+                ["--root", empty, "--report", "--json"],
+            )
+            for argv in cases:
+                with self.subTest(argv=argv):
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with redirect_stdout(stdout), redirect_stderr(stderr):
+                        code = scan_corpus.main(argv)
+                    self.assertEqual(code, 1)
+                    self.assertIn("WARNING", stderr.getvalue())
+                    self.assertTrue(stdout.getvalue().strip())
 
 
 class ReliabilityReport(unittest.TestCase):
@@ -1063,6 +1118,20 @@ class MalformedTrailingRowFailsOpen(unittest.TestCase):
             _text, content = ig.last_assistant_turn(path)
             self.assertEqual(content, [{"type": "text", "text": "All done."}])
 
+    def test_null_message_does_not_resurrect_an_older_leak(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(
+                tmp,
+                self._leaked_row() + "\n"
+                + json.dumps({"type": "assistant", "message": None}) + "\n",
+            )
+            self.assertEqual(ig.last_assistant_turn(path), ("", None))
+            code, out = _run_hook(
+                {"hook_event_name": "Stop", "stop_hook_active": False,
+                 "transcript_path": path}, env={"STOP_GUARD_NOLOG": "1"})
+            self.assertEqual(code, 0)
+            self.assertEqual(out.strip(), "", "ambiguous message must allow the stop")
+
 
 class ParallelToolCallRowsMerge(unittest.TestCase):
     """Invariant: a non-assistant row must NOT end a merge run.
@@ -1250,6 +1319,40 @@ class ScannerAppliesTheSplitRowMerge(unittest.TestCase):
                 self._row("msg_E", [{"type": "text", "text": " "}])]
         r = scan_corpus.report(self._corpus(rows))
         self.assertEqual(r["categories"]["empty_end_turn"], 1)
+
+    def test_unparseable_line_discards_a_split_message_in_both_scanners(self):
+        rows = [self._row("msg_G", [{"type": "text", "text": "court"}]),
+                "{not json",
+                self._row("msg_G", [{"type": "text", "text": '<invoke name="Bash">'}])]
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = os.path.join(tmp, "t.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write((row if isinstance(row, str) else json.dumps(row)) + "\n")
+
+        self.assertEqual(ig.detect_leak(ig.last_assistant_text(path)), (False, None))
+        _files, turns, _sessions, _skipped, unparseable = scan_corpus.scan(tmp)
+        self.assertEqual(unparseable, 1)
+        self.assertEqual(turns, [])
+        result = scan_corpus.report(tmp)
+        self.assertEqual(result["unparseable_lines"], 1)
+        self.assertEqual(result["categories"]["invoke_leak"], 0)
+
+    def test_non_dict_message_discards_a_split_message_in_both_scanners(self):
+        rows = [self._row("msg_H", [{"type": "text", "text": "court"}]),
+                {"type": "assistant", "message": None},
+                self._row("msg_H", [{"type": "text", "text": '<invoke name="Bash">'}])]
+        root = self._corpus(rows)
+        path = os.path.join(root, "t.jsonl")
+
+        self.assertEqual(ig.detect_leak(ig.last_assistant_text(path)), (False, None))
+        _files, turns, _sessions, _skipped, unparseable = scan_corpus.scan(root)
+        self.assertEqual(unparseable, 1)
+        self.assertEqual(turns, [])
+        result = scan_corpus.report(root)
+        self.assertEqual(result["unparseable_lines"], 1)
+        self.assertEqual(result["categories"]["invoke_leak"], 0)
 
 
 if __name__ == "__main__":

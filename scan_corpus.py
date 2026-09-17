@@ -77,8 +77,16 @@ def scan(root: str) -> tuple[list, list, set, int, int]:
                             evt = json.loads(line)
                         except json.JSONDecodeError:
                             unparseable_lines += 1
+                            merger.flush()  # ambiguous tail: discard the pending group
                             continue
-                        group = merger.feed(i, evt)
+                        try:
+                            group = merger.feed(i, evt)
+                        except (AttributeError, TypeError):
+                            # Mirrors last_assistant_turn: a malformed assistant
+                            # message invalidates any earlier pending content.
+                            unparseable_lines += 1
+                            merger.flush()
+                            continue
                         if group is not None and not _record_leak(
                                 group, f, file_mtime, turns, sessions):
                             unparseable_lines += 1
@@ -194,13 +202,21 @@ def report(root: str) -> dict:
                             evt = json.loads(line)
                         except json.JSONDecodeError:
                             unparseable_lines += 1
+                            merger.flush()  # ambiguous tail: discard the pending group
                             continue
                         try:
                             # Non-assistant events are classified as they arrive;
                             # assistant rows are held until their group is complete
                             # so the report judges the same merged content the hook
                             # would have.
-                            group = merger.feed(0, evt)
+                            try:
+                                group = merger.feed(0, evt)
+                            except (AttributeError, TypeError):
+                                # Mirrors last_assistant_turn: a malformed assistant
+                                # message invalidates any earlier pending content.
+                                unparseable_lines += 1
+                                merger.flush()
+                                continue
                             if group is not None:
                                 _classify_assistant(group, f, categories, by_day,
                                                     leak_by_stop, sessions_hit, days_seen)
@@ -396,8 +412,8 @@ def _classify_event(evt, f, categories, by_day, leak_by_stop, sessions_hit, days
         _assistant_buckets(msg.get("content"), msg, evt, hit, leak_by_stop)
 
 
-def _print_report(root: str) -> int:
-    r = report(root)
+def _print_report(root: str, result: "dict | None" = None) -> int:
+    r = result if result is not None else report(root)
     span = r["date_span"]
     print(f"scanned files : {r['scanned_files']}")
     if r.get("skipped_files") or r.get("unparseable_lines"):
@@ -427,6 +443,18 @@ def _print_report(root: str) -> int:
     return 0
 
 
+def _empty_root_status(root: str, file_count: int) -> int:
+    """Warn and fail when a corpus path yielded no transcript candidates."""
+    if file_count:
+        return 0
+    if os.path.isdir(root):
+        detail = f"no *.jsonl transcripts found under {root!r}"
+    else:
+        detail = f"root is not a directory: {root!r}"
+    print(f"[scan_corpus] WARNING: {detail}", file=sys.stderr)
+    return 1
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Scan a transcript corpus for INVOKE leaks")
     ap.add_argument("--root", default=os.path.expanduser("~/.claude/projects"),
@@ -439,17 +467,21 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     if args.report:
+        result = report(args.root)
+        status = _empty_root_status(args.root, result["scanned_files"])
         if args.json:
-            print(json.dumps(report(args.root), ensure_ascii=False, indent=2))
-            return 0
-        return _print_report(args.root)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return status
+        _print_report(args.root, result)
+        return status
 
     files, turns, sessions, skipped, unparseable = scan(args.root)
     summary = summarize(files, turns, sessions, skipped, unparseable)
+    status = _empty_root_status(args.root, summary["scanned_transcripts"])
 
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
-        return 0
+        return status
 
     s = summary
     print(f"scanned transcripts : {s['scanned_transcripts']}")
@@ -473,7 +505,7 @@ def main(argv=None) -> int:
         for t in turns:
             print(f"  {os.path.basename(t['file'])} line{t['line']} "
                   f"[{t['signature']}/{t['token']}] stop={t['stop_reason']}")
-    return 0
+    return status
 
 
 if __name__ == "__main__":
